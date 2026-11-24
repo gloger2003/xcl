@@ -1627,6 +1627,41 @@ fn gpu_typed_buffer_loads_and_stores() {
     assert_eq!(r.sgpr[50], 1 | 1 << 5, "s_bitset1");
 }
 
+#[test]
+fn gpu_typed_buffer_unorm8_rounds_to_nearest() {
+    if !gpu_ready() {
+        return;
+    }
+    let code = prog(&[
+        ("BUFFER_LOAD_FORMAT_XYZW", "ENC_MUBUF", &[("VDATA", 10), ("VADDR", 1), ("OFFEN", 1), ("SRSRC", 3), ("SOFFSET", 128)], None),
+        ("BUFFER_LOAD_FORMAT_X", "ENC_MUBUF", &[("VDATA", 14), ("SRSRC", 4), ("SOFFSET", 128)], None),
+        ("BUFFER_LOAD_FORMAT_XY", "ENC_MUBUF", &[("VDATA", 16), ("VADDR", 1), ("OFFEN", 1), ("SRSRC", 3), ("SOFFSET", 128)], None),
+        ("BUFFER_LOAD_FORMAT_XYZ", "ENC_MUBUF", &[("VDATA", 18), ("VADDR", 1), ("OFFEN", 1), ("SRSRC", 3), ("SOFFSET", 128)], None),
+    ]);
+    let mut st = KernelState::default();
+    let ident = 4 | 5 << 3 | 6 << 6 | 7 << 9;
+    st.sgpr[12..16].copy_from_slice(&[0x100, 0, 256, ident | 56 << 12]); // 8_8_8_8_UNORM
+    st.sgpr[16..20].copy_from_slice(&[0x200, 0, 1, ident | 1 << 12]); // 8_UNORM
+    let mut mem = [0; 0x200 / 4 + 5];
+    for (lane, regs) in st.vgpr.iter_mut().enumerate() {
+        regs[1] = 4 * lane as u32;
+        mem[0x100 / 4 + lane] = u32::from_le_bytes(std::array::from_fn(|c| (4 * lane + c) as u8));
+    }
+    mem[0x200 / 4] = 0xFE;
+    let result = runner::run_code(&code, &st, &mem).unwrap();
+    for (lane, regs) in result.vgpr.iter().enumerate() {
+        // gfx1036 measured these bits for 254 / 255 in #1414.
+        assert_eq!(regs[14], 0x3F7E_FEFF, "lane {lane}: 8_UNORM(0xFE) produced {:#010x}", regs[14]);
+        for (first, count) in [(10, 4), (16, 2), (18, 3)] {
+            for (c, bits) in regs[first..first + count].iter().enumerate() {
+                let byte = 4 * lane + c;
+                let expected = (byte as f64 / 255.0) as f32;
+                assert_eq!(*bits, expected.to_bits(), "{count}-component UNORM8 load, byte {byte:#04x}");
+            }
+        }
+    }
+}
+
 fn el(name: &str, index: u32, sv: u32, ct: u32, reg: u32, mask: u8) -> crate::gpu::dxbc::SigElement {
     crate::gpu::dxbc::SigElement { name: name.into(), index, system_value: sv, component_type: ct, register: reg, mask, rw_mask: mask, stream: 0 }
 }

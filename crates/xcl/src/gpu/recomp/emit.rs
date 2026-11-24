@@ -1781,8 +1781,9 @@ impl Em {
                 self.line(&format!("bool {t}_int = ((({t}_info >> 3) & 7u) == 4u) || ((({t}_info >> 3) & 7u) == 5u);"));
                 self.line(&format!("bool {t}_ok = and(({t}_info & 7u) != 0u, {});", in_range(format!("fmt_bytes({t}_info)"))));
                 self.line(&format!("uint4 {t}_r = ld_raw({t}_a);"));
+                let f32_output = d16_format.is_none();
                 self.line(&format!(
-                    "uint4 {t}_c = uint4(fmt_comp({t}_r, {t}_info, 0u), fmt_comp({t}_r, {t}_info, 1u), fmt_comp({t}_r, {t}_info, 2u), fmt_comp({t}_r, {t}_info, 3u));"
+                    "uint4 {t}_c = uint4(fmt_comp({t}_r, {t}_info, 0u, {f32_output}), fmt_comp({t}_r, {t}_info, 1u, {f32_output}), fmt_comp({t}_r, {t}_info, 2u, {f32_output}), fmt_comp({t}_r, {t}_info, 3u, {f32_output}));"
                 ));
                 if let Some((_, components, high)) = d16_format {
                     let half = |component: u64| {
@@ -5290,7 +5291,7 @@ float uf_small(uint v, uint mb) {
     return select(e == 31u, special, select(e == 0u, fm * exp2(-14.0f), exp2((float)e - 15.0f) * (1.0f + fm)));
 }
 uint fmt_bytes(uint info) { return (((info >> 8) & 63u) + ((info >> 14) & 63u) + ((info >> 20) & 63u) + ((info >> 26) & 63u)) / 8u; }
-uint fmt_comp(uint4 r, uint info, uint c) {
+uint fmt_comp(uint4 r, uint info, uint c, bool f32_output) {
     uint n = info & 7u; uint ty = (info >> 3) & 7u;
     bool isint = or(ty == 4u, ty == 5u);
     uint off = select(c > 0u, (info >> 8) & 63u, 0u) + select(c > 1u, (info >> 14) & 63u, 0u) + select(c > 2u, (info >> 20) & 63u, 0u);
@@ -5302,7 +5303,11 @@ uint fmt_comp(uint4 r, uint info, uint c) {
     float maxs = select(w >= 32u, 2147483647.0f, (float)((1u << ((w - 1u) & 31u)) - 1u));
     float fv = (float)v; float fsv = (float)sv;
     // exact endpoints (the hardware conversion is exact; DXC divides approximately)
-    uint f_un = asuint(select(v == 0u, 0.0f, select(fv >= maxu, 1.0f, fv / maxu)));
+    // Round up the 32-bit fraction for interior UNORM8 values before the uint-to-float
+    // rounding. Adding one breaks integer midpoints in the direction of the exact fraction.
+    float un8 = (float)(v * 0x01010101u + 1u) * (1.0f / 4294967296.0f);
+    float un = select(and(f32_output, w == 8u), un8, fv / maxu);
+    uint f_un = asuint(select(v == 0u, 0.0f, select(fv >= maxu, 1.0f, un)));
     uint f_sn = asuint(select(sv == 0, 0.0f, select(fsv >= maxs, 1.0f, max(fsv / maxs, -1.0f))));
     uint flt = select(w == 32u, v, select(w == 16u, asuint(f16tof32(v)), asuint(uf_small(v, select(w == 11u, 6u, 5u)))));
     uint res = select(ty == 0u, f_un, select(ty == 1u, f_sn, select(ty == 2u, asuint(fv), select(ty == 3u, asuint(fsv), select(ty == 4u, v, select(ty == 5u, (uint)sv, flt))))));
