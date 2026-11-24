@@ -3673,6 +3673,7 @@ pub(super) unsafe extern "system" fn resource_barrier_x(this: *mut c_void, n: u3
         return;
     }
     let mut out: Vec<[u32; 8]> = Vec::with_capacity(n as usize + 1);
+    let mut batch_ends = Vec::new();
     // a UAV barrier for all resources is in `out` / a transition from or to UNORDERED_ACCESS
     let (mut any_uav, mut uav_transition) = (false, false);
     for k in 0..n as usize {
@@ -3734,12 +3735,17 @@ pub(super) unsafe extern "system" fn resource_barrier_x(this: *mut c_void, n: u3
             }
             if b[1] != 1 && (b[4] == 0 || b[4] == u32::MAX) {
                 let resource = (b[2] as u64 | (b[3] as u64) << 32) as usize;
-                let replaced = b[1] == 0 && b[5] == 0 && b[6] == D3D12_RESOURCE_STATE_RENDER_TARGET.0 as u32
-                    && real::initial_clear_replaces_transition(this as usize, resource);
+                let restore_before_transition = b[1] == 0 && b[5] == 0 && b[6] == D3D12_RESOURCE_STATE_RENDER_TARGET.0 as u32
+                    && real::initial_clear_needs_restore(this as usize, resource);
                 real::note_target_state_op(this as usize, resource, real::TargetStateOp::Transition(b[6]));
-                if replaced {
-                    crate::xlog_info!("submitted target probe: coalesced following transition");
-                    continue;
+                if restore_before_transition {
+                    // Let the title's transition determine the outgoing state even if the
+                    // auxiliary list could not be built at submission.
+                    let mut restore = b;
+                    restore[5] = b[6];
+                    restore[6] = b[5];
+                    out.push(restore);
+                    batch_ends.push(out.len());
                 }
             }
             // UAV writes before (or after) the transition: the same holds for the window buffers
@@ -3757,7 +3763,13 @@ pub(super) unsafe extern "system" fn resource_barrier_x(this: *mut c_void, n: u3
         super::title_textures::note_transitions(this as usize, &t);
     }
     if !out.is_empty() {
-        pc::<unsafe extern "system" fn(*mut c_void, u32, *const [u32; 8])>(this, PC_RESOURCE_BARRIER)(this, out.len() as u32, out.as_ptr());
+        let submit = pc::<unsafe extern "system" fn(*mut c_void, u32, *const [u32; 8])>(this, PC_RESOURCE_BARRIER);
+        let mut start = 0;
+        for end in batch_ends.into_iter().chain(std::iter::once(out.len())) {
+            let batch = &out[start..end];
+            submit(this, batch.len() as u32, batch.as_ptr());
+            start = end;
+        }
     }
 }
 

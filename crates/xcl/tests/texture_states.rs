@@ -160,15 +160,21 @@ fn first_render_target_clear_depends_on_submitted_state() {
         let rtv = rtv_heap.GetCPUDescriptorHandleForHeapStart();
         let common = D3D12_RESOURCE_STATE_COMMON;
         let target = D3D12_RESOURCE_STATE_RENDER_TARGET;
-        for (name, simultaneous, preceding_list, bracket, trailing_barrier, follow_up, expect_error) in [
-            ("plain initial clear", false, false, false, true, None, true),
-            ("implicit clear with later transition", true, false, false, true, None, true),
-            ("implicit clear alone", true, false, false, false, None, false),
-            ("explicit transitions around clear", false, false, true, true, Some(target), false),
-            ("clear after an earlier list prepared the resource", false, true, false, false, Some(target), false),
-            ("unconditional transitions after an earlier list", false, true, true, false, None, true),
-            ("preparation with the redundant transition retained", false, true, false, true, None, true),
-            ("restoring the creation state after the clear list", false, true, false, false, Some(common), false),
+        #[derive(Clone, Copy, PartialEq, Eq)]
+        enum ClearBarriers { None, Bracket, Restore }
+        use ClearBarriers::{Bracket, Restore};
+        let mut original_errors = 0;
+        for (name, simultaneous, preceding_list, barriers, trailing_barrier, follow_up, expect_error) in [
+            ("plain initial clear", false, false, ClearBarriers::None, true, None, true),
+            ("implicit clear with later transition", true, false, ClearBarriers::None, true, None, true),
+            ("implicit clear alone", true, false, ClearBarriers::None, false, None, false),
+            ("explicit transitions around clear", false, false, Bracket, true, Some(target), false),
+            ("clear after an earlier list prepared the resource", false, true, ClearBarriers::None, false, Some(target), false),
+            ("unconditional transitions after an earlier list", false, true, Bracket, false, None, true),
+            ("preparation with the redundant transition retained", false, true, ClearBarriers::None, true, None, true),
+            ("restoring the creation state after the clear list", false, true, ClearBarriers::None, false, Some(common), false),
+            ("restoring before the title transition", false, true, Restore, true, Some(target), false),
+            ("restoring without a preparation list", false, false, Restore, true, Some(target), true),
         ] {
             let mut flags = D3D12_RESOURCE_FLAG_ALLOW_RENDER_TARGET;
             if simultaneous {
@@ -188,11 +194,11 @@ fn first_render_target_clear_depends_on_submitted_state() {
             let alloc: ID3D12CommandAllocator = dev.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT).unwrap();
             let list: ID3D12GraphicsCommandList = dev.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None).unwrap();
             let to_target = || transition(&resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, common, target);
-            if bracket {
+            if barriers == Bracket {
                 list.ResourceBarrier(&[to_target()]);
             }
             list.ClearRenderTargetView(rtv, &[0.25, 0.5, 0.75, 1.0], None);
-            if bracket {
+            if barriers != ClearBarriers::None {
                 list.ResourceBarrier(&[transition(&resource, D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES, target, common)]);
             }
             if trailing_barrier {
@@ -219,6 +225,11 @@ fn first_render_target_clear_depends_on_submitted_state() {
             let observed = errors(&q);
             println!("{name}: {} debug-layer errors", observed.len());
             assert_eq!(!observed.is_empty(), expect_error, "{name}: {observed:?}");
+            if name == "plain initial clear" {
+                original_errors = observed.len();
+            } else if barriers == Restore && !preceding_list {
+                assert!(observed.len() <= original_errors, "{name}: {observed:?}");
+            }
             if let Some(expected) = follow_up {
                 let next: ID3D12GraphicsCommandList = dev.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &alloc, None).unwrap();
                 if expected == common {

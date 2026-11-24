@@ -2761,7 +2761,7 @@ pub(super) fn note_target_state_op(list: usize, resource: usize, op: TargetState
     }
 }
 
-pub(super) fn initial_clear_replaces_transition(list: usize, resource: usize) -> bool {
+pub(super) fn initial_clear_needs_restore(list: usize, resource: usize) -> bool {
     if super::present::presents() != 0 {
         return false;
     }
@@ -2929,11 +2929,15 @@ pub(super) unsafe fn execute_with_target_preparations(
         reap_target_preparations();
     }
     let plan = observe_submitted_target_states(lists);
+    let requested = !plan.is_empty();
     if let Some((payload, preparations, fence)) = build_target_preparations(queue, lists, plan) {
         crate::xlog_info!("submitted target probe: inserted {} preparation lists", preparations.len());
         execute(queue, payload.len() as u32, payload.as_ptr());
         retain_target_preparations(queue, fence, preparations);
     } else {
+        if requested {
+            crate::xlog_warn!("submitted target probe: preparation unavailable, submitting title lists");
+        }
         execute(queue, lists.len() as u32, lists.as_ptr());
     }
 }
