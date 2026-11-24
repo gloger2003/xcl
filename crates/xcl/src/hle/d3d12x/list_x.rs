@@ -1808,7 +1808,14 @@ unsafe fn try_gpu_wait(queue: *mut c_void, w: &PendingWait, list_writes: &[(u64,
         (pre_ok.0, pre_ok.1, pre_ok.2, wait_seq)
     };
 
-    if let Err(e) = q.Wait(&fence, w.value) {
+    let wait = real::with_target_queue_order(|| {
+        let result = q.Wait(&fence, w.value);
+        if result.is_ok() {
+            real::note_submitted_target_wait(q_raw, fence.as_raw() as usize, w.value);
+        }
+        result
+    });
+    if let Err(e) = wait {
         let mut g = SYNC_GRAPH.lock().unwrap();
         if let Some(cell) = g.as_mut().and_then(|gr| gr.cells.get_mut(&w.va)) {
             if let Some(pos) = cell.armed_waits.iter().rposition(|aw| aw.val == w.value && aw.waiting_queue == q_raw && aw.wait_seq == wait_seq) {
@@ -3703,6 +3710,9 @@ pub(super) unsafe extern "system" fn resource_barrier_x(this: *mut c_void, n: u3
                     words.fill(0);
                 }
             }
+            let before = (b[2] as u64 | (b[3] as u64) << 32) as usize;
+            let after = (b[4] as u64 | (b[5] as u64) << 32) as usize;
+            real::note_submitted_target_aliasing(this as usize, before, after);
         }
         if ty == 2 {
             // UAV (resource +8): translated shaders reach title memory through XCL's memory
